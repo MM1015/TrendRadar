@@ -31,6 +31,194 @@ import requests
 
 from .batch import add_batch_headers, get_max_batch_header_size
 from .formatters import convert_markdown_to_mrkdwn, strip_markdown
+from trendradar.report.helpers import clean_title
+
+
+FEISHU_CARD_ITEM_LIMIT = 5
+
+
+def _is_feishu_custom_bot_webhook(webhook_url: str) -> bool:
+    """Return True when the webhook targets a Feishu/Lark custom bot."""
+    return "open.feishu.cn" in webhook_url or "open.larksuite.com" in webhook_url
+
+
+def _extract_feishu_card_items(report_data: Dict, limit: int = FEISHU_CARD_ITEM_LIMIT) -> list[Dict[str, Any]]:
+    """Flatten grouped report data into a top-N list for card rendering."""
+    items: list[Dict[str, Any]] = []
+    for stat in report_data.get("stats", []):
+        keyword = stat.get("word", "")
+        for title_data in stat.get("titles", []):
+            link_url = title_data.get("mobile_url") or title_data.get("url") or ""
+            ranks = title_data.get("ranks") or []
+            best_rank = min(ranks) if ranks else None
+            items.append(
+                {
+                    "keyword": keyword,
+                    "title": clean_title(title_data.get("title", "")),
+                    "link_url": link_url,
+                    "best_rank": best_rank,
+                    "count": title_data.get("count", 1),
+                    "time_display": title_data.get("time_display", ""),
+                }
+            )
+            if len(items) >= limit:
+                return items
+    return items
+
+
+def _build_feishu_hotlist_card(
+    report_data: Dict,
+    report_type: str,
+    get_time_func: Optional[Callable[[], datetime]] = None,
+    limit: int = FEISHU_CARD_ITEM_LIMIT,
+) -> Dict[str, Any]:
+    """Build a Feishu interactive card for Douyin hotlist summaries."""
+    now = get_time_func() if get_time_func else datetime.now()
+    items = _extract_feishu_card_items(report_data, limit=limit)
+    matched_total = sum(
+        len(stat.get("titles", []))
+        for stat in report_data.get("stats", [])
+        if stat.get("count", 0) > 0
+    )
+
+    elements: list[Dict[str, Any]] = [
+        {
+            "tag": "markdown",
+            "content": (
+                f"**TrendRadar 全网热点聚合 热点监控 抖音热点每日推送**\n"
+                f"🔐 **安全标识**: 测试消息\n"
+                f"📅 **时间**: {now.strftime('%Y年%m月%d日 %H:%M')}\n"
+                f"📊 **数据来源**: 抖音热榜（关键词筛选）\n"
+                f"🔥 **总数**: {matched_total} 条匹配热点\n"
+                f"📱 **主题**: IP / 创始人 / 商业"
+            ),
+        }
+    ]
+
+    if items:
+        elements.append({"tag": "hr"})
+        for index, item in enumerate(items, start=1):
+            detail_bits = []
+            if item["best_rank"] is not None:
+                detail_bits.append(f"🔥 榜单排名: TOP {item['best_rank']}")
+            if item["count"] > 1:
+                detail_bits.append(f"📈 上榜次数: {item['count']}")
+            if item["time_display"]:
+                detail_bits.append(f"🕒 时间: {item['time_display']}")
+
+            body_lines = [f"**{index}. {item['title']}**"]
+            if detail_bits:
+                body_lines.extend(detail_bits)
+            if item["keyword"]:
+                body_lines.append(f"🏷️ 关键词: {item['keyword']}")
+            if item["link_url"]:
+                body_lines.append(f"🔗 [查看抖音内容]({item['link_url']})")
+
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": "\n".join(body_lines),
+                }
+            )
+            if index < len(items):
+                elements.append({"tag": "hr"})
+    else:
+        elements.extend(
+            [
+                {"tag": "hr"},
+                {
+                    "tag": "markdown",
+                    "content": "今天暂未匹配到与 **IP / 创始人 / 商业** 相关的抖音热点。",
+                },
+            ]
+        )
+
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "config": {
+                "wide_screen_mode": True,
+                "enable_forward": True,
+            },
+            "header": {
+                "template": "red",
+                "title": {
+                    "tag": "plain_text",
+                    "content": f"TrendRadar 全网热点聚合 - 抖音精选 {len(items) or limit} 条",
+                },
+                "subtitle": {
+                    "tag": "plain_text",
+                    "content": report_type,
+                },
+            },
+            "elements": elements,
+        },
+    }
+
+
+def _build_feishu_post_payload(
+    report_data: Dict,
+    report_type: str,
+    get_time_func: Optional[Callable[[], datetime]] = None,
+    limit: int = FEISHU_CARD_ITEM_LIMIT,
+) -> Dict[str, Any]:
+    """Fallback rich-text payload for bots that block interactive cards."""
+    now = get_time_func() if get_time_func else datetime.now()
+    items = _extract_feishu_card_items(report_data, limit=limit)
+    matched_total = sum(
+        len(stat.get("titles", []))
+        for stat in report_data.get("stats", [])
+        if stat.get("count", 0) > 0
+    )
+
+    content = [
+        [{"tag": "text", "text": "TrendRadar 全网热点聚合 热点监控 抖音热点每日推送"}],
+        [{"tag": "text", "text": "安全标识：测试消息"}],
+        [{"tag": "text", "text": f"时间：{now.strftime('%Y年%m月%d日 %H:%M')}"}],
+        [{"tag": "text", "text": "数据来源：抖音热榜（关键词筛选）"}],
+        [{"tag": "text", "text": f"总数：{matched_total} 条匹配热点"}],
+        [{"tag": "text", "text": "主题：IP / 创始人 / 商业"}],
+    ]
+
+    if items:
+        for index, item in enumerate(items, start=1):
+            suffix = []
+            if item["best_rank"] is not None:
+                suffix.append(f"TOP {item['best_rank']}")
+            if item["count"] > 1:
+                suffix.append(f"上榜 {item['count']} 次")
+            if item["time_display"]:
+                suffix.append(item["time_display"])
+            meta_text = " | ".join(suffix) if suffix else "当期热点"
+
+            content.append([{"tag": "text", "text": f"{index}. {item['title']}"}])
+            content.append([{"tag": "text", "text": f"信息：{meta_text}"}])
+            if item["link_url"]:
+                content.append(
+                    [
+                        {
+                            "tag": "a",
+                            "text": "查看抖音内容",
+                            "href": item["link_url"],
+                        }
+                    ]
+                )
+    else:
+        content.append(
+            [{"tag": "text", "text": "今天暂未匹配到与 IP / 创始人 / 商业 相关的抖音热点。"}]
+        )
+
+    return {
+        "msg_type": "post",
+        "content": {
+            "post": {
+                "zh_cn": {
+                    "title": f"TrendRadar 全网热点聚合 - 抖音精选 {len(items) or limit} 条",
+                    "content": content,
+                }
+            }
+        },
+    }
 
 
 def _render_ai_analysis(ai_analysis: Any, channel: str) -> str:
@@ -156,6 +344,8 @@ def send_to_feishu(
 
     # 统一添加批次头部（已预留空间，不会超限）
     batches = add_batch_headers(batches, "feishu", batch_size)
+    if _is_feishu_custom_bot_webhook(webhook_url):
+        batches = [""]
 
     print(f"{log_prefix}消息分为 {len(batches)} 批次发送 [{report_type}]")
 
@@ -175,6 +365,13 @@ def send_to_feishu(
                     "text": batch_content,
                 },
             }
+        elif _is_feishu_custom_bot_webhook(webhook_url):
+            payload = _build_feishu_post_payload(
+                report_data=report_data,
+                report_type=report_type,
+                get_time_func=get_time_func,
+                limit=FEISHU_CARD_ITEM_LIMIT,
+            )
         else:
             payload = {
                 "msg_type": "interactive",
