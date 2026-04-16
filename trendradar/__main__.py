@@ -348,6 +348,15 @@ class NewsAnalyzer:
             )
             return has_matched_news or has_new_news
 
+    def _should_send_empty_notification(self) -> bool:
+        """Allow sending an empty-state card for Feishu custom bots in current mode."""
+        feishu_webhook = self.ctx.config.get("FEISHU_WEBHOOK_URL", "")
+        return (
+            self.report_mode == "current"
+            and bool(feishu_webhook)
+            and ("open.feishu.cn" in feishu_webhook or "open.larksuite.com" in feishu_webhook)
+        )
+
     def _prepare_ai_analysis_data(
         self,
         ai_mode: str,
@@ -928,6 +937,7 @@ class NewsAnalyzer:
         has_news_content = self._has_valid_content(stats, new_titles)
         has_rss_content = bool(rss_items and len(rss_items) > 0)
         has_any_content = has_news_content or has_rss_content
+        should_send_empty_notification = self._should_send_empty_notification()
 
         # 计算热榜匹配条数
         news_count = sum(len(stat.get("titles", [])) for stat in stats) if stats else 0
@@ -936,7 +946,7 @@ class NewsAnalyzer:
         if (
             cfg["ENABLE_NOTIFICATION"]
             and has_notification
-            and has_any_content
+            and (has_any_content or should_send_empty_notification)
         ):
             # 输出推送内容统计
             content_parts = []
